@@ -234,6 +234,8 @@ The table below summarises the most commonly touched files after introducing bou
 - `src/train_token_compose.py` – Main training loop that loads Stable Diffusion, applies token-level supervision and integrates the new boundary-consistency regulariser.
 - `src/data_utils.py` – Dataset preprocessing layer that loads images, segmentation masks and boundary maps into batches.
 - `src/loss_utils.py` – Helper utilities that compute grounding losses and the boundary-consistency terms.
+- `train/visualize_cross_attention.py` – Command-line tool that generates an image and saves the per-token cross-attention
+  heatmaps (both standalone and overlaid) for inspection.
 - `data/` – Example dataset scaffolding scripts and a sample `imagefolder` layout for COCO-derived assets.
 
 You can also use the following code to download our checkpoints and generate images:
