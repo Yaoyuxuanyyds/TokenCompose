@@ -15,9 +15,10 @@ Suppose you have `input.json` with following format:
 ```
 
 We provide an overview of this pipeline in plain words given the input json:
-1. the pipeline will choose the best caption for each image using [CLIP](https://github.com/openai/CLIP). 
+1. the pipeline will choose the best caption for each image using [CLIP](https://github.com/openai/CLIP).
 2. the pipeline will use [flair](https://github.com/flairNLP/flair) to extract all nouns from the selected caption.
 3. the pipeline will use [Grounded-Segment-Anything](https://github.com/IDEA-Research/Grounded-Segment-Anything) to segment the image based on the extracted noun words, and generate token-level correspondence in a json file.
+4. finally, `gen_boundary_map.py` aggregates all instance masks into a soft boundary map that is later used to supervise cross-attention.
 
 ### Setup Environment
 
@@ -74,6 +75,10 @@ You should change the following variables in `run_pipeline.sh` to your own path
 INPUT_JSON_PATH=/path/to/input_json.json
 OUTPUT_JSON_PATH=/path/to/output_json.json
 OUTPUT_DIR=/path/to/segmentation_output_dir
+BOUNDARY_SUBDIR=boundary
+BOUNDARY_WIDTH=3
+BOUNDARY_BLUR_KERNEL=0
+BOUNDARY_BLUR_SIGMA=0.0
 ```
 
 Then, run the pipeline
@@ -81,9 +86,9 @@ Then, run the pipeline
 bash run_pipeline.sh
 ```
 
-You will get the segmentation maps in `OUTPUT_DIR` and the output json in `OUTPUT_JSON_PATH`
+You will get the segmentation maps and boundary maps in `OUTPUT_DIR` and the output json in `OUTPUT_JSON_PATH`
 
-The segmentation maps will have the following format
+The generated assets will follow the structure below
 ```
 OUTPUT_DIR/
     seg/
@@ -95,6 +100,10 @@ OUTPUT_DIR/
             mask_image2_noun1.png
             mask_image2_noun2.png
             ...
+        ...
+    boundary/
+        image1_boundary.png
+        image2_boundary.png
         ...
 ```
 
