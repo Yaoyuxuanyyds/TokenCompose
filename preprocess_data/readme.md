@@ -70,7 +70,7 @@ model_ckpt/
 
 See `run_pipeline.sh` for an example of how to run the pipeline
 
-You should change the following variables in `run_pipeline.sh` to your own path
+You can either export the following variables before invoking the script or edit them inline inside `run_pipeline.sh`.
 ```bash
 INPUT_JSON_PATH=/path/to/input_json.json
 OUTPUT_JSON_PATH=/path/to/output_json.json
@@ -87,6 +87,8 @@ bash run_pipeline.sh
 ```
 
 You will get the segmentation maps and boundary maps in `OUTPUT_DIR` and the output json in `OUTPUT_JSON_PATH`
+
+> 💡 Tip: the repository root also contains [`run_full_pipeline.sh`](../run_full_pipeline.sh), which chains this preprocessing stage together with `train/src/train_token_compose.py` so you can launch the entire training job with a single command.
 
 The generated assets will follow the structure below
 ```
