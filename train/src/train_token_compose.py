@@ -36,7 +36,7 @@ from diffusers.training_utils import EMAModel
 
 from attn_utils import AttentionStore
 from attn_utils import register_attention_control, get_cross_attn_map_from_unet
-from loss_utils import get_grounding_loss_by_layer, get_word_idx
+from loss_utils import get_boundary_consistency_loss, get_grounding_loss_by_layer, get_word_idx
 from data_utils import DatasetPreprocess
 
 logger = get_logger(__name__, log_level="INFO")
@@ -268,6 +268,12 @@ def main(args):
     total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
     token_loss_scale = args.token_loss_scale
     pixel_loss_scale = args.pixel_loss_scale
+    geo_loss_alpha = args.geo_loss_alpha
+    geo_boundary_weight = args.geo_boundary_weight
+    geo_smooth_weight = args.geo_smooth_weight
+    geo_timestep_fraction = args.geo_timestep_fraction
+    boundary_blur_kernel = args.boundary_blur_kernel
+    boundary_blur_sigma = args.boundary_blur_sigma
     is_training_sd21 = args.pretrained_model_name_or_path == "stabilityai/stable-diffusion-2-1"
 
     logger.info("***** Running training *****")
@@ -279,6 +285,12 @@ def main(args):
     logger.info(f"  Total optimization steps = {args.max_train_steps}")
     logger.info(f"  Token loss scale: {token_loss_scale}")
     logger.info(f"  Pixel loss scale: {pixel_loss_scale}")
+    logger.info(f"  Geo loss alpha: {geo_loss_alpha}")
+    logger.info(f"  Geo boundary weight: {geo_boundary_weight}")
+    logger.info(f"  Geo smooth weight: {geo_smooth_weight}")
+    logger.info(f"  Geo timestep fraction: {geo_timestep_fraction}")
+    logger.info(f"  Boundary blur kernel: {boundary_blur_kernel}")
+    logger.info(f"  Boundary blur sigma: {boundary_blur_sigma}")
     logger.info(f"  Is SD21: {is_training_sd21}")
     logger.info(f"  Layers w. grounding obj.: {train_layers_ls}")
 
@@ -409,6 +421,49 @@ def main(args):
 
                 grounding_loss = token_loss_scale * token_loss + pixel_loss_scale * pixel_loss
 
+                geo_loss = torch.zeros((), device=model_pred.device, dtype=model_pred.dtype)
+                geo_boundary_raw = torch.zeros_like(geo_loss)
+                geo_smooth_raw = torch.zeros_like(geo_loss)
+                geo_boundary_weighted = torch.zeros_like(geo_loss)
+                geo_smooth_weighted = torch.zeros_like(geo_loss)
+
+                if geo_loss_alpha > 0 and "boundary_map" in batch:
+                    timestep_threshold = noise_scheduler.config.num_train_timesteps * geo_timestep_fraction
+                    if (timesteps.float() <= timestep_threshold).all():
+                        boundary_tensor = batch["boundary_map"].to(model_pred.device, dtype=model_pred.dtype)
+                        token_mask = (
+                            (input_ids != tokenizer.pad_token_id)
+                            & (input_ids != tokenizer.bos_token_id)
+                            & (input_ids != tokenizer.eos_token_id)
+                        )
+                        token_mask = token_mask.to(model_pred.device, dtype=model_pred.dtype)
+
+                        layer_boundary_losses = []
+                        layer_smooth_losses = []
+                        for train_layer in train_layers_ls:
+                            attn_maps = attn_dict.get(train_layer, [])
+                            if len(attn_maps) == 0:
+                                continue
+                            layer_res = int(train_layer.split("_")[1])
+                            boundary_component, smooth_component = get_boundary_consistency_loss(
+                                boundary_map=boundary_tensor,
+                                token_mask=token_mask,
+                                res=layer_res,
+                                input_attn_map_ls=attn_maps,
+                                is_training_sd21=is_training_sd21,
+                                blur_kernel_size=boundary_blur_kernel,
+                                blur_sigma=boundary_blur_sigma,
+                            )
+                            layer_boundary_losses.append(boundary_component)
+                            layer_smooth_losses.append(smooth_component)
+
+                        if len(layer_boundary_losses) > 0:
+                            geo_boundary_raw = torch.stack(layer_boundary_losses).mean()
+                            geo_smooth_raw = torch.stack(layer_smooth_losses).mean()
+                            geo_boundary_weighted = geo_boundary_weight * geo_boundary_raw
+                            geo_smooth_weighted = geo_smooth_weight * geo_smooth_raw
+                            geo_loss = geo_loss_alpha * (geo_boundary_weighted + geo_smooth_weighted)
+
                 denoise_loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
 
                 # get learing rate
@@ -419,10 +474,15 @@ def main(args):
                 loss_dict = {
                     "step/step_cnt" : step_cnt,
                     "lr/learning_rate" : lr,
-                    "train/token_loss_w_scale": token_loss_scale * token_loss,
-                    "train/pixel_loss_w_scale": pixel_loss_scale * pixel_loss,
-                    "train/denoise_loss": denoise_loss,
-                    "train/total_loss": denoise_loss + grounding_loss,
+                    "train/token_loss_w_scale": (token_loss_scale * token_loss).detach(),
+                    "train/pixel_loss_w_scale": (pixel_loss_scale * pixel_loss).detach(),
+                    "train/denoise_loss": denoise_loss.detach(),
+                    "train/geo_loss": geo_loss.detach(),
+                    "train/geo_boundary_raw": geo_boundary_raw.detach(),
+                    "train/geo_smooth_raw": geo_smooth_raw.detach(),
+                    "train/geo_boundary_w_scale": geo_boundary_weighted.detach(),
+                    "train/geo_smooth_w_scale": geo_smooth_weighted.detach(),
+                    "train/total_loss": (denoise_loss + grounding_loss + geo_loss).detach(),
                 }
 
                 # add grounding loss
@@ -432,7 +492,7 @@ def main(args):
                     for name, value in loss_dict.items():
                         wandb.log({name : value}, step=step_cnt)
 
-                loss = denoise_loss + grounding_loss
+                loss = denoise_loss + grounding_loss + geo_loss
 
                 # we reset controller twice because we use grad_checkpointing, which will have additional forward during the backward process
                 controller.reset()
@@ -678,6 +738,18 @@ if __name__ == "__main__":
     parser.add_argument('--train_up', nargs='+', type=int, help='use which res layers in U-Net up', default=[])
 
     parser.add_argument("--pixel_loss_scale", type=float, required=True)
+    parser.add_argument("--geo_loss_alpha", type=float, default=0.0,
+                        help="Global weight for the geometric consistency loss.")
+    parser.add_argument("--geo_boundary_weight", type=float, default=1.0,
+                        help="Weight for the boundary penalty term inside the geometric loss.")
+    parser.add_argument("--geo_smooth_weight", type=float, default=0.1,
+                        help="Weight for the smoothness term inside the geometric loss.")
+    parser.add_argument("--geo_timestep_fraction", type=float, default=0.5,
+                        help="Apply the geometric loss only when sampled timesteps fall within this fraction of the schedule.")
+    parser.add_argument("--boundary_blur_kernel", type=int, default=0,
+                        help="Kernel size for optional Gaussian smoothing applied to boundary maps (0 disables blur).")
+    parser.add_argument("--boundary_blur_sigma", type=float, default=0.0,
+                        help="Standard deviation for optional Gaussian smoothing of boundary maps (0 disables blur).")
 
     parser.add_argument("--caption_column", type=str, default="text")
     parser.add_argument("--image_column", type=str, default="image")

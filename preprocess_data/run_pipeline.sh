@@ -6,6 +6,10 @@ export CUDA_VISIBLE_DEVICES=0
 INPUT_JSON_PATH=/path/to/input_json.json
 OUTPUT_JSON_PATH=/path/to/output_json.json
 OUTPUT_DIR=/path/to/segmentation_output_dir
+BOUNDARY_SUBDIR=boundary
+BOUNDARY_WIDTH=3
+BOUNDARY_BLUR_KERNEL=0
+BOUNDARY_BLUR_SIGMA=0.0
 ################ params end ##############
 
 ################ gen sentence noun tags start #############
@@ -27,6 +31,18 @@ python gen_mask.py \
   --text_threshold 0.25 \
   --device "cuda" 
 ################ gen mask end #############
+
+
+################ gen boundary map start #############
+python gen_boundary_map.py \
+  --input_metadata $OUTPUT_JSON_PATH \
+  --dataset_root $OUTPUT_DIR \
+  --output_metadata $OUTPUT_JSON_PATH \
+  --boundary_subdir $BOUNDARY_SUBDIR \
+  --boundary_width $BOUNDARY_WIDTH \
+  --blur_kernel $BOUNDARY_BLUR_KERNEL \
+  --blur_sigma $BOUNDARY_BLUR_SIGMA
+################ gen boundary map end #############
 
 
 
