@@ -203,7 +203,7 @@ Our finetuned models do not contain any extra modules and can be directly used i
 
 The repository now ships with a one-stop shell script that runs the full data preprocessing + fine-tuning workflow with boundary-consistency supervision.
 
-1. Prepare an input JSON/JSONL file whose entries follow the schema described in [preprocess_data/readme.md](preprocess_data/readme.md) (`img_path` and `caption`). Ensure the raw images are copied into the target dataset split folder (e.g. `your_dataset/train/`).
+1. Prepare an input JSON/JSONL file whose entries follow the schema described in [preprocess_data/readme.md](preprocess_data/readme.md) (`img_path` and `caption`). Ensure the raw images live under the target dataset split folder (or enable `--copy-images` in the preprocessing stage).
 2. Export (or inline edit inside the script) the variables in [`run_full_pipeline.sh`](run_full_pipeline.sh) to point to your dataset, output directory and training hyper-parameters.
 3. Launch the pipeline:
 
@@ -218,22 +218,22 @@ The script first calls `preprocess_data/run_pipeline.sh` to build segmentation m
 The table below summarises the most commonly touched files after introducing boundary-consistency supervision. Use it as a quick lookup while navigating the code base.
 
 ### Root level
-- `run_full_pipeline.sh` – End-to-end automation for preprocessing (noun extraction, segmentation, boundary generation) followed by training.
+- `run_full_pipeline.sh` – End-to-end automation for boundary-focused preprocessing (metadata normalisation, SAM masks, boundary generation) followed by training.
 - `requirements.txt` – Python dependencies for training utilities.
 - `README.md` – High-level documentation (this file).
 
 ### `preprocess_data/`
 - `run_pipeline.sh` – Composable preprocessing orchestrator. Respects environment variables for paths/hyper-parameters and supports custom Python binaries.
-- `gen_noun_tgt.py` – Selects the CLIP-best caption per image and extracts noun tokens via Flair POS tagging.
-- `gen_mask.py` – Runs GroundingDINO + SAM-HQ to predict instance masks for each noun and writes per-token segmentation paths back to the metadata.
+- `prepare_metadata.py` – Canonicalises captions and aligns image paths with the HuggingFace `imagefolder` layout.
+- `gen_sam_auto_masks.py` – Uses the Segment Anything automatic mask generator to produce unconditional instance masks and store their relative paths.
 - `gen_boundary_map.py` – Aggregates instance masks into soft boundary maps with optional Gaussian smoothing and records their locations in the metadata.
 - `readme.md` – Detailed setup instructions for acquiring checkpoints and running the preprocessing stack.
 
 ### `train/`
 - `train.sh` – Reference training launcher with environment-variable overrides for model choice, logging and geometric loss weights.
-- `src/train_token_compose.py` – Main training loop that loads Stable Diffusion, applies token-level supervision and integrates the new boundary-consistency regulariser.
-- `src/data_utils.py` – Dataset preprocessing layer that loads images, segmentation masks and boundary maps into batches.
-- `src/loss_utils.py` – Helper utilities that compute grounding losses and the boundary-consistency terms.
+- `src/train_token_compose.py` – Main training loop that loads Stable Diffusion, computes the diffusion denoising objective and adds the attention-boundary regulariser (the original TokenCompose grounding terms are commented out).
+- `src/data_utils.py` – Dataset preprocessing layer that loads images and boundary maps into batches.
+- `src/loss_utils.py` – Helper utilities for the boundary-consistency terms (legacy TokenCompose helpers are preserved as comments for reference).
 - `train/visualize_cross_attention.py` – Command-line tool that generates an image and saves the per-token cross-attention
   heatmaps (both standalone and overlaid) for inspection.
 - `data/` – Example dataset scaffolding scripts and a sample `imagefolder` layout for COCO-derived assets.

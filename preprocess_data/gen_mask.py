@@ -1,4 +1,5 @@
 '''
+Legacy TokenCompose preprocessing component kept for archival purposes.
 Following code is adapted from
 https://github.com/IDEA-Research/Grounded-Segment-Anything/blob/main/grounded_sam_demo.py
 '''

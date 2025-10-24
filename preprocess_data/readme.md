@@ -1,129 +1,80 @@
-
 ## Preprocess Data Pipeline
 
 ### Overview
 
-Suppose you have `input.json` with following format:
+The updated pipeline is aligned with the attention-boundary supervision objective and no longer relies on token-specific masks. Given an `input.json` containing entries such as
+
 ```
 [
     {
-        "img_path": "/path/to/image1.jpg",
-        "caption" : ["caption1", "caption2", ...]
+        "img_path": "/absolute/path/to/image1.jpg",
+        "caption": ["caption option 1", "caption option 2"]
     },
     ...
 ]
 ```
 
-We provide an overview of this pipeline in plain words given the input json:
-1. the pipeline will choose the best caption for each image using [CLIP](https://github.com/openai/CLIP).
-2. the pipeline will use [flair](https://github.com/flairNLP/flair) to extract all nouns from the selected caption.
-3. the pipeline will use [Grounded-Segment-Anything](https://github.com/IDEA-Research/Grounded-Segment-Anything) to segment the image based on the extracted noun words, and generate token-level correspondence in a json file.
-4. finally, `gen_boundary_map.py` aggregates all instance masks into a soft boundary map that is later used to supervise cross-attention.
+`run_pipeline.sh` performs the following steps:
+
+1. **prepare_metadata.py** converts the raw JSON into `metadata.jsonl`, normalises captions, and ensures every `file_name` is rooted inside the dataset split.
+2. **gen_sam_auto_masks.py** runs the [Segment Anything](https://github.com/facebookresearch/segment-anything) automatic mask generator (SAM or SAM-HQ checkpoints) to obtain unconditional instance masks for every image.
+3. **gen_boundary_map.py** aggregates the masks into a soft boundary map that matches the cross-attention spatial resolution expected by the boundary-consistency loss.
+
+The resulting `metadata.jsonl` contains exactly the fields consumed by the new training code: `file_name`, `text`, `mask_paths`, and `boundary_path`.
 
 ### Setup Environment
 
-#### 1.  Clone Grounded-Segment-Anything Repository
-
 ```bash
-cd preprocess_data
-git clone https://github.com/IDEA-Research/Grounded-Segment-Anything
-```
-
-#### 2. Setup Environment
-```bash
-conda create -n preprocess_data python=3.8.18
+conda create -n preprocess_data python=3.10
 conda activate preprocess_data
-pip install torch==2.1.0 torchvision==0.16.0 torchaudio==2.1.0 --index-url https://download.pytorch.org/whl/cu118
-```
-Then following the instructions in [Grounded-Segment-Anything repo](https://github.com/IDEA-Research/Grounded-Segment-Anything) to install the dependencies
-
-After that, install CLIP and flair
-```bash
-pip install git+https://github.com/openai/CLIP.git
-pip install flair
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+pip install git+https://github.com/facebookresearch/segment-anything.git
+pip install pillow tqdm numpy
 ```
 
-#### 3. Copy Necessary Subfolders
-```bash
-cp -r Grounded-Segment-Anything/segment_anything .
-cp -r Grounded-Segment-Anything/GroundingDINO .
-```
+Download a SAM/SAM-HQ checkpoint (for example `sam_vit_h_4b8939.pth`) into `preprocess_data/model_ckpt/` or any location you prefer.
 
-#### 4. Download Necessary Checkpoints
+### Run the pipeline
+
+Export or edit the variables consumed by `run_pipeline.sh`:
 
 ```bash
-cd model_ckpt
-# download the pretrained groundingdino-swin-tiny model
-wget https://github.com/IDEA-Research/GroundingDINO/releases/download/v0.1.0-alpha/groundingdino_swint_ogc.pth
-```
-Then, download `sam_hq_vit_h.pth` from [here](https://github.com/SysCV/sam-hq#model-checkpoints)
-
-
-You should have the following files in the model_ckpt folder
-```
-model_ckpt/
-    groundingdino_swint_ogc.pth
-    sam_hq_vit_h.pth
-```
-
-## Run the pipeline
-
-See `run_pipeline.sh` for an example of how to run the pipeline
-
-You can either export the following variables before invoking the script or edit them inline inside `run_pipeline.sh`.
-```bash
-INPUT_JSON_PATH=/path/to/input_json.json
-OUTPUT_JSON_PATH=/path/to/output_json.json
-OUTPUT_DIR=/path/to/segmentation_output_dir
+INPUT_JSON_PATH=/path/to/input.json
+OUTPUT_JSON_PATH=/path/to/train/metadata.jsonl
+OUTPUT_DIR=/path/to/train
+SAM_CHECKPOINT=/path/to/sam_vit_h_4b8939.pth
+SAM_MODEL_TYPE=vit_h   # vit_l, vit_b, or any key supported by segment_anything
 BOUNDARY_SUBDIR=boundary
 BOUNDARY_WIDTH=3
 BOUNDARY_BLUR_KERNEL=0
 BOUNDARY_BLUR_SIGMA=0.0
+# Optional overrides:
+#   COPY_IMAGES=0     # reuse images in-place instead of copying into OUTPUT_DIR/images
+#   IMAGE_SUBDIR=imgs # customise the copy destination when COPY_IMAGES=1
 ```
 
-Then, run the pipeline
+Then launch the preprocessing pipeline:
+
 ```bash
+cd preprocess_data
 bash run_pipeline.sh
 ```
 
-You will get the segmentation maps and boundary maps in `OUTPUT_DIR` and the output json in `OUTPUT_JSON_PATH`
+The generated assets follow the structure below:
 
-> 💡 Tip: the repository root also contains [`run_full_pipeline.sh`](../run_full_pipeline.sh), which chains this preprocessing stage together with `train/src/train_token_compose.py` so you can launch the entire training job with a single command.
-
-The generated assets will follow the structure below
 ```
 OUTPUT_DIR/
+    images/              # present only when --copy-images is passed to prepare_metadata.py
     seg/
-        image1/
-            mask_image1_noun1.png
-            mask_image1_noun2.png
+        <image_stem>/
+            <image_stem>_mask_000.png
+            <image_stem>_mask_001.png
             ...
-        image2/
-            mask_image2_noun1.png
-            mask_image2_noun2.png
-            ...
-        ...
     boundary/
-        image1_boundary.png
-        image2_boundary.png
-        ...
+        <image_stem>_boundary.png
+    metadata.jsonl
 ```
 
-## Tokenizer Check
+Each entry inside `metadata.jsonl` stores relative paths so the HuggingFace `imagefolder` loader can read the dataset directly.
 
-Due to typos in image captions (**be careful as this is very common**), there may have some words that can not be processed correctly by tokenizer.
-
-We highly recommand to dry run your training pipeline first to check if there are any data issues or you may want to implement a fault tolerant training pipeline. If you decide to manually fix the typos from your custom captions, we provide a sample script below:
-
-You should change the following variable in `tokenizer_check.sh`
-```
-INPUT_JOSN_PATH=/path/to/output.json
-```
-
-Then, run the tokenizer check
-```bash
-bash tokenizer_check.sh
-```
-
-And manually fix all typo. Then you can use the processed data as your training data.
-
+> 💡 Tip: the repository root also contains [`run_full_pipeline.sh`](../run_full_pipeline.sh), which chains this preprocessing stage together with `train/src/train_token_compose.py` so you can launch the entire training job with a single command.

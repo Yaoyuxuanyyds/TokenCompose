@@ -36,7 +36,7 @@ from diffusers.training_utils import EMAModel
 
 from attn_utils import AttentionStore
 from attn_utils import register_attention_control, get_cross_attn_map_from_unet
-from loss_utils import get_boundary_consistency_loss, get_grounding_loss_by_layer, get_word_idx
+from loss_utils import get_boundary_consistency_loss
 from data_utils import DatasetPreprocess
 
 logger = get_logger(__name__, log_level="INFO")
@@ -266,8 +266,6 @@ def main(args):
 
     # Train!
     total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
-    token_loss_scale = args.token_loss_scale
-    pixel_loss_scale = args.pixel_loss_scale
     geo_loss_alpha = args.geo_loss_alpha
     geo_boundary_weight = args.geo_boundary_weight
     geo_smooth_weight = args.geo_smooth_weight
@@ -283,8 +281,6 @@ def main(args):
     logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     logger.info(f"  Total optimization steps = {args.max_train_steps}")
-    logger.info(f"  Token loss scale: {token_loss_scale}")
-    logger.info(f"  Pixel loss scale: {pixel_loss_scale}")
     logger.info(f"  Geo loss alpha: {geo_loss_alpha}")
     logger.info(f"  Geo boundary weight: {geo_boundary_weight}")
     logger.info(f"  Geo smooth weight: {geo_smooth_weight}")
@@ -364,62 +360,58 @@ def main(args):
                 # Predict the noise residual and compute loss
                 model_pred = unet(noisy_latents, timesteps, encoder_hidden_states).sample
 
-                prompts = batch["text"]
-                assert len(prompts) == 1, "only support batch size 1"
-
-                postprocess_seg_ls = batch["postprocess_seg_ls"]
-
-                word_token_idx_ls = [] # postion of token in text
-                gt_seg_ls = []
-                for item in postprocess_seg_ls:
-                    # item: [[[words], attn_gt], [[words], attn_gt], ...]
-                    # words = "teddy bear" or "surfboard" or, ....
-                    words_indices = []
-
-                    words = item[0][0]
-                    words = words.lower()
-
-                    words_indices = get_word_idx(prompts[0], words, tokenizer)
-
-                    word_token_idx_ls.append(words_indices)
-
-                    seg_gt = item[1] # seg_gt: torch.Size([1, 1, 512, 512])
-                    gt_seg_ls.append(seg_gt)
-
-                # calculate loss
                 attn_dict = get_cross_attn_map_from_unet(
-                    attention_store=controller, 
+                    attention_store=controller,
                     is_training_sd21=is_training_sd21
                 )
+                # The TokenCompose token/pixel grounding objective relied on the noun
+                # segmentation pipeline. That supervision is intentionally disabled for
+                # the boundary-consistency experiments, so the corresponding loss is
+                # forced to zero.
+                grounding_loss = torch.zeros((), device=model_pred.device, dtype=model_pred.dtype)
 
-                token_loss = 0.0
-                pixel_loss = 0.0
+                geo_loss = torch.zeros((), device=model_pred.device, dtype=model_pred.dtype)
+                geo_boundary_raw = torch.zeros_like(geo_loss)
+                geo_smooth_raw = torch.zeros_like(geo_loss)
+                geo_boundary_weighted = torch.zeros_like(geo_loss)
+                geo_smooth_weighted = torch.zeros_like(geo_loss)
 
-                grounding_loss_dict = {}
+                if geo_loss_alpha > 0 and "boundary_map" in batch:
+                    timestep_threshold = noise_scheduler.config.num_train_timesteps * geo_timestep_fraction
+                    if (timesteps.float() <= timestep_threshold).all():
+                        boundary_tensor = batch["boundary_map"].to(model_pred.device, dtype=model_pred.dtype)
+                        token_mask = (
+                            (input_ids != tokenizer.pad_token_id)
+                            & (input_ids != tokenizer.bos_token_id)
+                            & (input_ids != tokenizer.eos_token_id)
+                        )
+                        token_mask = token_mask.to(model_pred.device, dtype=model_pred.dtype)
 
-                # mid_8, up_16, up_32, up_64 for sd14
-                for train_layer in train_layers_ls:
-                    layer_res = int(train_layer.split("_")[1])
+                        layer_boundary_losses = []
+                        layer_smooth_losses = []
+                        for train_layer in train_layers_ls:
+                            attn_maps = attn_dict.get(train_layer, [])
+                            if len(attn_maps) == 0:
+                                continue
+                            layer_res = int(train_layer.split("_")[1])
+                            boundary_component, smooth_component = get_boundary_consistency_loss(
+                                boundary_map=boundary_tensor,
+                                token_mask=token_mask,
+                                res=layer_res,
+                                input_attn_map_ls=attn_maps,
+                                is_training_sd21=is_training_sd21,
+                                blur_kernel_size=boundary_blur_kernel,
+                                blur_sigma=boundary_blur_sigma,
+                            )
+                            layer_boundary_losses.append(boundary_component)
+                            layer_smooth_losses.append(smooth_component)
 
-                    attn_loss_dict = \
-                        get_grounding_loss_by_layer(
-                        _gt_seg_list=gt_seg_ls,
-                        word_token_idx_ls=word_token_idx_ls,
-                        res=layer_res,
-                        input_attn_map_ls=attn_dict[train_layer],
-                        is_training_sd21=is_training_sd21,
-                    )
-
-                    layer_token_loss = attn_loss_dict["token_loss"]
-                    layer_pixel_loss = attn_loss_dict["pixel_loss"]
-
-                    grounding_loss_dict[f"token/{train_layer}"] = layer_token_loss
-                    grounding_loss_dict[f"pixel/{train_layer}"] = layer_pixel_loss
-
-                    token_loss += layer_token_loss
-                    pixel_loss += layer_pixel_loss
-
-                grounding_loss = token_loss_scale * token_loss + pixel_loss_scale * pixel_loss
+                        if len(layer_boundary_losses) > 0:
+                            geo_boundary_raw = torch.stack(layer_boundary_losses).mean()
+                            geo_smooth_raw = torch.stack(layer_smooth_losses).mean()
+                            geo_boundary_weighted = geo_boundary_weight * geo_boundary_raw
+                            geo_smooth_weighted = geo_smooth_weight * geo_smooth_raw
+                            geo_loss = geo_loss_alpha * (geo_boundary_weighted + geo_smooth_weighted)
 
                 geo_loss = torch.zeros((), device=model_pred.device, dtype=model_pred.dtype)
                 geo_boundary_raw = torch.zeros_like(geo_loss)
@@ -474,25 +466,21 @@ def main(args):
                 loss_dict = {
                     "step/step_cnt" : step_cnt,
                     "lr/learning_rate" : lr,
-                    "train/token_loss_w_scale": (token_loss_scale * token_loss).detach(),
-                    "train/pixel_loss_w_scale": (pixel_loss_scale * pixel_loss).detach(),
                     "train/denoise_loss": denoise_loss.detach(),
+                    "train/grounding_loss_disabled": grounding_loss.detach(),
                     "train/geo_loss": geo_loss.detach(),
                     "train/geo_boundary_raw": geo_boundary_raw.detach(),
                     "train/geo_smooth_raw": geo_smooth_raw.detach(),
                     "train/geo_boundary_w_scale": geo_boundary_weighted.detach(),
                     "train/geo_smooth_w_scale": geo_smooth_weighted.detach(),
-                    "train/total_loss": (denoise_loss + grounding_loss + geo_loss).detach(),
+                    "train/total_loss": (denoise_loss + geo_loss).detach(),
                 }
-
-                # add grounding loss
-                loss_dict.update(grounding_loss_dict)
 
                 if args.report_to == "wandb":
                     for name, value in loss_dict.items():
                         wandb.log({name : value}, step=step_cnt)
 
-                loss = denoise_loss + grounding_loss + geo_loss
+                loss = denoise_loss + geo_loss
 
                 # we reset controller twice because we use grad_checkpointing, which will have additional forward during the backward process
                 controller.reset()
@@ -726,18 +714,10 @@ if __name__ == "__main__":
         default=None
     )
 
-    # below are additional params
-    parser.add_argument(
-        "--token_loss_scale", 
-        type=float, 
-        required=True
-    )
-
     parser.add_argument('--train_down', nargs='+', type=int, help='use which res layers in U-Net down', default=[])
     parser.add_argument('--train_mid', nargs='+', type=int, help='use which res layers in U-Net mid', default=[])
     parser.add_argument('--train_up', nargs='+', type=int, help='use which res layers in U-Net up', default=[])
 
-    parser.add_argument("--pixel_loss_scale", type=float, required=True)
     parser.add_argument("--geo_loss_alpha", type=float, default=0.0,
                         help="Global weight for the geometric consistency loss.")
     parser.add_argument("--geo_boundary_weight", type=float, default=1.0,

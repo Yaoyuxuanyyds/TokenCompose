@@ -1,6 +1,6 @@
 
-INPUT_JOSN_PATH=/path/to/output.json
+METADATA_PATH=/path/to/metadata.jsonl
 
 python tokenizer_check.py \
-    --input_json_path $INPUT_JOSN_PATH 
+    --metadata "$METADATA_PATH"
 

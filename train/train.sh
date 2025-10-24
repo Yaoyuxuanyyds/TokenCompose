@@ -20,9 +20,8 @@ CHECKPOINT_LIMIT="${CHECKPOINT_LIMIT:-10}"
 # allow 500 extra steps to be safe
 MAX_TRAINING_STEPS="${MAX_TRAINING_STEPS:-24500}"
 
-# loss and lr settings
-TOKEN_LOSS_SCALE="${TOKEN_LOSS_SCALE:-1e-3}"
-PIXEL_LOSS_SCALE="${PIXEL_LOSS_SCALE:-5e-5}"
+# loss and lr settings (the TokenCompose token/pixel objectives are disabled; only
+# denoising + boundary regularisation remain)
 LEARNING_RATE="${LEARNING_RATE:-5e-6}"
 GEO_LOSS_ALPHA="${GEO_LOSS_ALPHA:-0.2}"
 GEO_BOUNDARY_WEIGHT="${GEO_BOUNDARY_WEIGHT:-1.0}"
@@ -54,8 +53,6 @@ python src/train_token_compose.py \
   --output_dir="$OUTPUT_DIR" \
   --checkpoints_total_limit "$CHECKPOINT_LIMIT" \
   --checkpointing_steps "$CHECKPOINT_STEP" \
-  --token_loss_scale "$TOKEN_LOSS_SCALE" \
-  --pixel_loss_scale "$PIXEL_LOSS_SCALE" \
   --train_mid 8 \
   --train_up 16 32 64 \
   --report_to="wandb" \
