@@ -84,6 +84,30 @@ class DatasetPreprocess:
         # boundary-consistency objective and the associated processing is disabled.
         # examples["postprocess_seg_ls"] = []
 
+            if boundary_paths is None:
+                raise ValueError("boundary_path field is required in the dataset metadata.")
+
+            boundary_path = boundary_paths[i]
+            if boundary_path is None:
+                raise ValueError("boundary_path must not be None.")
+
+            if not os.path.exists(boundary_path):
+                boundary_path = boundary_path.replace(self.boundary_dir_origin_path, self.boundary_dir_relative_path)
+                boundary_path = os.path.join(self.train_data_dir, boundary_path)
+                if not os.path.exists(boundary_path):
+                    raise ValueError(f"boundary path {boundary_path} does not exist")
+
+            boundary_map = Image.open(boundary_path).convert("L")
+            boundary_map = self.attn_transforms(boundary_map)
+
+            if boundary_map.shape[0] != 1:
+                boundary_map = boundary_map[0].unsqueeze(0)
+
+            if boundary_map.max() > 0:
+                boundary_map = boundary_map / boundary_map.max()
+
+            examples["boundary_map"].append(boundary_map)
+
         del examples["image"]
         if "attn_list" in examples:
             del examples["attn_list"]

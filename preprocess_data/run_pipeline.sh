@@ -67,5 +67,17 @@ fi
 ################ gen boundary map end #############
 
 
+################ gen boundary map start #############
+"${PYTHON_BIN}" gen_boundary_map.py \
+  --input_metadata "$OUTPUT_JSON_PATH" \
+  --dataset_root "$OUTPUT_DIR" \
+  --output_metadata "$OUTPUT_JSON_PATH" \
+  --boundary_subdir "$BOUNDARY_SUBDIR" \
+  --boundary_width "$BOUNDARY_WIDTH" \
+  --blur_kernel "$BOUNDARY_BLUR_KERNEL" \
+  --blur_sigma "$BOUNDARY_BLUR_SIGMA"
+################ gen boundary map end #############
+
+
 
 

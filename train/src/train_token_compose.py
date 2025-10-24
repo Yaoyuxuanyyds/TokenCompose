@@ -413,6 +413,49 @@ def main(args):
                             geo_smooth_weighted = geo_smooth_weight * geo_smooth_raw
                             geo_loss = geo_loss_alpha * (geo_boundary_weighted + geo_smooth_weighted)
 
+                geo_loss = torch.zeros((), device=model_pred.device, dtype=model_pred.dtype)
+                geo_boundary_raw = torch.zeros_like(geo_loss)
+                geo_smooth_raw = torch.zeros_like(geo_loss)
+                geo_boundary_weighted = torch.zeros_like(geo_loss)
+                geo_smooth_weighted = torch.zeros_like(geo_loss)
+
+                if geo_loss_alpha > 0 and "boundary_map" in batch:
+                    timestep_threshold = noise_scheduler.config.num_train_timesteps * geo_timestep_fraction
+                    if (timesteps.float() <= timestep_threshold).all():
+                        boundary_tensor = batch["boundary_map"].to(model_pred.device, dtype=model_pred.dtype)
+                        token_mask = (
+                            (input_ids != tokenizer.pad_token_id)
+                            & (input_ids != tokenizer.bos_token_id)
+                            & (input_ids != tokenizer.eos_token_id)
+                        )
+                        token_mask = token_mask.to(model_pred.device, dtype=model_pred.dtype)
+
+                        layer_boundary_losses = []
+                        layer_smooth_losses = []
+                        for train_layer in train_layers_ls:
+                            attn_maps = attn_dict.get(train_layer, [])
+                            if len(attn_maps) == 0:
+                                continue
+                            layer_res = int(train_layer.split("_")[1])
+                            boundary_component, smooth_component = get_boundary_consistency_loss(
+                                boundary_map=boundary_tensor,
+                                token_mask=token_mask,
+                                res=layer_res,
+                                input_attn_map_ls=attn_maps,
+                                is_training_sd21=is_training_sd21,
+                                blur_kernel_size=boundary_blur_kernel,
+                                blur_sigma=boundary_blur_sigma,
+                            )
+                            layer_boundary_losses.append(boundary_component)
+                            layer_smooth_losses.append(smooth_component)
+
+                        if len(layer_boundary_losses) > 0:
+                            geo_boundary_raw = torch.stack(layer_boundary_losses).mean()
+                            geo_smooth_raw = torch.stack(layer_smooth_losses).mean()
+                            geo_boundary_weighted = geo_boundary_weight * geo_boundary_raw
+                            geo_smooth_weighted = geo_smooth_weight * geo_smooth_raw
+                            geo_loss = geo_loss_alpha * (geo_boundary_weighted + geo_smooth_weighted)
+
                 denoise_loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
 
                 # get learing rate
